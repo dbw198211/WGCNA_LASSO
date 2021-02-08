@@ -1,0 +1,311 @@
+library(WGCNA)
+library(glmnet)
+
+###################
+##input data
+
+datExpr = as.data.frame(t(exp1)) #input data
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+rownames(datExpr)
+
+
+################### 
+#test weather the samples and genes are suitable for WGCNA
+
+gsg = goodSamplesGenes(datExpr, verbose = 3)
+gsg$allOK
+gsg$allOKsampleTree = hclust(dist(datExpr), method = "average")
+
+if (!gsg$allOK) {
+  if (sum(!gsg$goodGenes) > 0)
+    printFlush(paste("Removing genes:", paste(names(datExpr)[!gsg$goodGenes], collapse = ", ")))
+  if (sum(!gsg$goodSamples) > 0)
+    printFlush(paste("Removing samples:", paste(names(datExpr)[!gsg$goodSamples], collapse = ", ")))
+  datExpr = datExpr[gsg$goodSamples, gsg$goodGenes]
+}
+
+
+dis = dist(datExpr, method = "euclidean")
+clst = hclust(dis, method = "complete")
+sizeGrWindow(53,36) #作图窗口大小
+par(mfrow = c(1,1)) #窗口里放几张图
+plot(clst, 
+     hang = -1,
+     #labels = F,
+     cex = 0.2)
+#abline(h = 10000, col = "red")
+pdf("Fig1_part1.pdf", width = 25, height = 5)
+plot(clst, 
+     hang = -1,
+     #labels = F,
+     cex = 0.4)
+dev.off()
+
+########################
+##calculate soft power
+load("Train_Data.Rdata")
+load("datExpr.Rdata")
+
+powers <- c(1:15) #预设β值范围
+sft = pickSoftThreshold(datExpr, 
+                        powerVector = powers, 
+                        verbose = 5,
+                        networkType = "unsigned") #计算β值
+sft$powerEstimate # 计算出来的最佳 β = 7 存放在
+sft$fitIndices
+write.csv(sft$fitIndices, file = "Supplementary Table 1.csv")
+
+sizeGrWindow(6,6) 
+par(pin = c(2,2))
+#  R2 ~ soft-thresholding power
+plot(sft$fitIndices[,1], 
+     -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlim = c(0, 16),
+     ylim = c(0, 1),
+     xaxs = "i", 
+     yaxs ="r",
+     xlab = "Soft Threshold (power)",
+     ylab = "Scale Free Topology Model Fit,signed R^2",
+     type = "n",
+     cex.axis = 1,
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,
+     cex=0.5,
+     col="red");
+abline(h=0.85,col="blue")
+
+
+# Mean connectivity ~ soft-thresholding power plot
+sizeGrWindow(6,6) 
+par(pin = c(2,2))
+par(mfrow = c(1,1))
+plot(sft$fitIndices[,1], 
+     sft$fitIndices[,5],
+     xlim = c(0, 16),
+     #ylim = c(0, 1),
+     xaxs = "i", 
+     yaxs ="r",
+     xlab = "Soft Threshold (power)",
+     ylab ="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], 
+     sft$fitIndices[,5], 
+     labels=powers, 
+     cex=0.5,
+     col="red")
+
+##histogram of K
+k = softConnectivity(datE=datExpr, power = sft$powerEstimate) 
+sizeGrWindow(6, 6)
+par(pin = c(2,2))
+hist(k,
+     breaks = "Sturges",
+     xlim = c(0, 400), 
+     ylim = c(0, 7000))
+
+sizeGrWindow(6,6)
+par(pin = c(2,2))
+scaleFreePlot(k, 
+              xlim = c(0.5, 2.5),
+              cex = 1,
+              main = "Check Scale free topology\n")
+
+######calculate the matrix
+
+adjacency = adjacency(datExpr, power = sft$powerEstimate) # calculate the adjacent matrix
+TOM = TOMsimilarity(adjacency) #邻近矩阵到拓扑矩阵的转换
+dissTOM = 1-TOM
+geneTree = hclust(as.dist(dissTOM), method = "average") 
+dynamicMods = cutreeDynamic(dendro = geneTree, 
+                            distM = dissTOM,
+                            deepSplit = 1, # 0|1|2|3|4, 
+                            pamRespectsDendro = FALSE,
+                            minClusterSize = 15) 
+table(dynamicMods)
+dynamicColors = labels2colors(dynamicMods) 
+table(dynamicColors)
+
+sizeGrWindow(8,6)
+plotDendroAndColors(geneTree, 
+                    dynamicColors, 
+                    "Dynamic Tree Cut",
+                    dendroLabels = FALSE, 
+                    hang = 0.03,
+                    addGuide = TRUE, 
+                    guideHang = 0.05,
+                    main = "Gene dendrogram and module colors")
+
+MEs = moduleEigengenes(datExpr, colors = dynamicColors)$eigengenes 
+MEDiss = 1-cor(MEs) # Calculate dissimilarity of module eigengenes
+METree = hclust(as.dist(MEDiss), method = "average")
+
+merge = mergeCloseModules(datExpr, 
+                          dynamicColors, 
+                          cutHeight = 0.1, 
+                          verbose = 3) 
+table(merge$colors)
+mergedColors = merge$colors
+Geneinmodule = as.data.frame(mergedColors)
+row.names(Geneinmodule) = colnames(datExpr)
+
+mergedMEs = merge$newMEs
+
+sizeGrWindow(12, 9)
+plotDendroAndColors(geneTree, 
+                    cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, 
+                    colorHeight = 0.1,
+                    colorHeightBase = 0.2,
+                    colorHeightMax = 1.0,
+                    hang = 0.02,
+                    addGuide = TRUE, 
+                    guideHang = 0.05)
+
+
+nGene = ncol(datExpr)
+nSelect = 1000
+set.seed(1982)
+select = sample(nGene, size = nSelect)
+selectTOM = dissTOM[select, select]
+
+selectTree = hclust(as.dist(selectTOM), method = "average")
+selectColors = mergedColors[select]
+
+plotDiss = selectTOM^7
+diag(plotDiss) = NA
+
+sizeGrWindow(9,9)
+TOMplot(plotDiss, 
+        selectTree,
+        selectColors,
+        col = colorpanel(250,'red',"orange",'lemonchiffon'),
+        main = "Network heatmap plot")
+
+sizeGrWindow(20,10)
+par(pin = c(1,1))
+plotEigengeneNetworks(mergedMEs, 
+                      "", 
+                      marDendro = c(0,4,1,2), 
+                      marHeatmap = c(3,4,1,2), 
+                      cex.lab = 0.8, 
+                      xLabelsAngle = 90)
+
+# Plot the dendrogram
+sizeGrWindow(6,6)
+par(cex = 1.0)
+plotEigengeneNetworks(mergedMEs, 
+                      "Eigengene dendrogram", 
+                      marDendro = c(0,4,2,0),
+                      hang = -1,
+                      plotHeatmaps = FALSE)
+
+# Plot the heatmap matrix (note: this plot will overwrite the dendrogram plot)
+par(cex = 1.0)
+plotEigengeneNetworks(mergedMEs, 
+                      "Eigengene adjacency heatmap", 
+                      marHeatmap = c(3,4,2,2),
+                      plotDendrograms = FALSE, 
+                      xLabelsAngle = 90)
+
+Mo_col = as.data.frame(table(mergedColors))
+write.csv(Mo_col, file = "Gene_Num_for_Module.csv")
+
+##calculated the correlation between module and clinical traits
+datTraits1 = datTraits[,c(2, 12, 13, 4)]
+datTraits1 = apply(datTraits1, 2 , as.numeric)
+datTraits2 = as.data.frame(datTraits1)
+moduleTraitCor = cor(mergedMEs, datTraits2, use = "p")
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nrow(datExpr))
+Module_Trait_Cor = as.data.frame(cbind(moduleTraitCor, moduleTraitPvalue))
+colnames(Module_Trait_Cor) = c("Cor_value", "P_value")
+
+# correlation heatmap
+## 连接相关性和 pvalue
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+                   signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+
+
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits2),
+               yLabels = names(mergedMEs),
+               ySymbols = names(mergedMEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(1000),
+               textMatrix = textMatrix,
+               setStdMargins = T,
+               #xColorWidth = 5,
+               #yColorWidth = 2 * strwidth("M"),
+               cex.lab.x = 1,
+               cex.lab.y = 1,
+               cex.text = 0.4,
+               font.lab.y = 1,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+
+
+
+geneModuleMembership = as.data.frame(cor(datExpr, mergedMEs, use = "p"))
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), 
+                                          nrow(datExpr)))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+
+geneTraitSignificance = as.data.frame(cor(datExpr, datTraits1, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), 
+                                          nrow(datExpr)))
+names(geneTraitSignificance) = paste("GS.", traitNames, sep="");
+names(GSPvalue) = paste("p.GS.", traitNames, sep="");
+
+Geneinmodule = cbind(Geneinmodule, c(1:nrow(Geneinmodule)))
+
+Brown = as.data.frame(Geneinmodule[Geneinmodule$mergedColors == "brown", ])
+GM_Brown = geneModuleMembership[row.names(geneModuleMembership) %in% row.names(Brown), ]
+GT_Brown = geneTraitSignificance[row.names(geneTraitSignificance) %in% row.names(Brown), ]
+match(row.names(GM_Brown), row.names(GT_Brown))
+
+gt_brown = GT_Brown[abs(GT_Brown$GRADE_D) > 0.2 | abs(GT_Brown$STAGE_D) > 0.2 | abs(GT_Brown$AGE) > 0.2,]
+gm_brown = GM_Brown[GM_Brown$MEbrown > 0.8, ]
+hub_brown = intersect(row.names(gt_brown), row.names(gm_brown))
+lncRNA_brown = intersect(row.names(Brown), lncRNA$ensembl_gene_id) 
+hub_lncRNA_brown = intersect(hub_brown, lncRNA_brown)
+
+
+
+
+########################
+##select lncRNA in the module with LASSO
+
+
+match(row.names(datExpr), row.names(datTraits))
+Surv_lncExpr = datExpr[,colnames(datExpr) %in% lncRNA_brown]
+
+match(row.names(Surv_lncExpr), row.names(datTraits))
+x1 = as.matrix(Surv_lncExpr)
+os = as.double(datTraits$OS_MONTHS)
+status = as.double(datTraits$OS_STATUS_D)
+y1 = Surv(os, status)
+
+fit = glmnet(x = x1, 
+             y = y1, 
+             family = "cox",
+             alpha = 1,
+             nlambda = 50)
+
+set.seed(1234567)
+cv.fit = cv.glmnet(x = x1,
+                   y = y1,
+                   family = "cox",
+                   nfolds = 50)
+par(pin = c(4,2))
+plot(cv.fit)
+
+plot(fit,
+     xvar = "lambda", 
+     label = TRUE)
+
+coefficient = coef(cv.fit, s = cv.fit$lambda.min) 
+
